@@ -43,17 +43,29 @@ DAEMONIZE_CMD="prog"
 [[ $3 == 'y' ]] && DAEMONIZE_CMD="prog &"
 
 msg_send() {
+	local icon
+	local found
+	local pref_arg
+	icon=$1
+	shift 1
 	if [[ -n $DEBUG ]]; then
 		echo "$@"
 	else
-		notify-send -u critical -t ${DIALOG_TIME} "$@"
+		found=$(find -L /usr/share/.icons/apps/scalable \
+			~/.local/share/.icons/apps/scalable \
+			~/.icons/apps/scalable \
+			-iname "${icon}.svg" -o -iname "${icon}.ico" \
+			-type f 2>/dev/null | head -n1)
+
+		[[ -n ${found} ]] && pref_arg="-i"
+		notify-send -u critical -t ${DIALOG_TIME} "$@" ${pref_arg} "${found}"
 	fi
 }
 
 
 NL=$'\n'
 print_info() {
-	msg_send "$1 crashed${NL}Type of fault: $2${NL}Reason: $3${NL}IP: $4${NL}SP: $5${NL}In: $6"
+	msg_send "$1" "$1($2) crashed${NL}${NL}Type of fault: $3${NL}${NL}Reason: $4${NL}${NL}IP: $5${NL}${NL}SP: $6${NL}${NL}In: $7"
 }
 
 _DMESG_MAX_NAME_WIDTH=15
@@ -62,7 +74,6 @@ execute_trap() {
 	local sub_1
 	local name
 	local pid
-	local name_and_pid
 	local reason
 	local ip
 	local sp
@@ -81,15 +92,13 @@ execute_trap() {
 	ip=${ip%% *}
 	sp=${sp%% *}
 	pid=${pid%%]*}
-	name_and_pid="${name}[${pid}]"
-	print_info "${name_and_pid}" "trap" "${reason}" "${ip}" "${sp}" "${lib}"
+	print_info "${name}" "${pid}" "trap" "${reason}" "${ip}" "${sp}" "${lib}"
 }
 
 execute_sigsegv() {
 	local sub_1
 	local name
 	local pid
-	local name_and_pid
 	local reason
 	local ip
 	local sp
@@ -108,8 +117,7 @@ execute_sigsegv() {
 	ip=${ip%% *}
 	sp=${sp%% *}
 	pid=${pid%%]*}
-	name_and_pid="${name}[${pid}]"
-	print_info "${name_and_pid}" "segfault" "${reason}" "${ip}" "${sp}" "${lib}"
+	print_info "${name}" "${pid}" "segfault" "${reason}" "${ip}" "${sp}" "${lib}"
 }
 
 prog() {
