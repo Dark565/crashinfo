@@ -1,0 +1,114 @@
+#!/bin/bash
+
+#	Copyright (C) 2020 Grzegorz Kociołek
+#
+#	This program is free software: you can redistribute it and/or modify
+#	it under the terms of the GNU General Public License as published by
+#	the Free Software Foundation, either version 3 of the License, or
+#	(at your option) any later version.
+#
+#	This program is distributed in the hope that it will be useful,
+#	but WITHOUT ANY WARRANTY; without even the implied warranty of
+#	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#	GNU General Public License for more details.
+#
+#	You should have received a copy of the GNU General Public License
+#	along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+# Register and show info about crashing programs
+
+# Look for a symbol on a specific position
+
+export LANG=C
+export LC_ALL=C
+
+die() {
+	echo "$*" >&2
+	exit 1
+}
+
+print_stats() {
+	echo "${sh_name}"
+	echo ${norm_vm_addr}
+	echo ${norm_addr}
+	echo "${sym_name}"
+	echo "${sym_off}"
+	echo "${norm_sym_size}"
+	exit $1
+}
+
+rm_trailing_zeros() {
+	local res
+	[[ $1 =~ ^0*([0-9a-f]+)\ *$ ]]
+	printf -v res "%d" 0x${BASH_REMATCH[1]}
+	eval "$2=\$res"
+}
+
+file=$1
+printf -v off "%d" "$2" || die "Invalid offset"
+
+declare -r SH_NAME=0 SH_TYPE=1 SH_ADDR=2 SH_OFF=3 \
+	       SH_SIZE=4 SH_ES=5 SH_FLG=6 SH_LK=7 SH_INF=8 SH_AL=9 
+
+declare -r ST_VALUE=0 ST_SIZE=1 ST_TYPE=2 ST_BIND=3 ST_VIS=4 ST_NDX=5 ST_NAME=6 
+
+readelf -S -W "${file}" 2>/dev/null | tail -n +6 | head -n -5 | sed -E -e 's/ +/ /g' -e 's/^ *\[[^]]*\] *//' | \
+{	
+	sh_name="[unknown]"
+	norm_addr=0
+	norm_size=0
+	norm_vm_addr=0
+
+	sym_spec=
+	sym_name="[unknown]"
+	sym_off=0
+	sym_rel_off=0
+	norm_sym_vm_addr=0
+	norm_sym_size=0
+
+	ndx=0
+	while read -r LINE; do
+
+		let ndx++
+		readarray -d' ' ARR <<<"$LINE"
+
+		rm_trailing_zeros "${ARR[SH_OFF]}" _norm_addr
+		rm_trailing_zeros "${ARR[SH_SIZE]}" _norm_size
+
+		(( off >= _norm_addr && off - _norm_addr < _norm_size )) || continue
+		norm_addr=${_norm_addr}
+		norm_size=${_norm_size}
+		sh_name=${ARR[SH_NAME]%$'\n'}
+
+		rm_trailing_zeros "${ARR[SH_ADDR]}" norm_vm_addr
+
+		readelf -W -s "${file}" | grep -v -E '^(Symbol| *Num|$)' | grep -E '^.*?FUNC' | sed -E -e 's/^ *[0-9]*: //' -e 's/ +/ /g' | \
+		{
+			while read -r SYM_LINE; do
+				readarray -d' ' SYM_ARR <<<"$SYM_LINE"
+
+				[[ ${SYM_ARR[ST_NDX]% } == ${ndx} ]] || continue
+			
+				rm_trailing_zeros "${SYM_ARR[ST_VALUE]}" _norm_sym_vm_addr
+				rm_trailing_zeros "${SYM_ARR[ST_SIZE]}" _norm_sym_size
+				
+				_sym_off=$((_norm_sym_vm_addr - norm_vm_addr + norm_addr))
+				_sym_rel_off=$((off - _sym_off))
+				(( off >= _sym_off && _sym_rel_off < _norm_sym_size )) || continue
+
+				[[ -z $sym_spec || $_sym_rel_off -le $sym_rel_off ]] || continue
+
+				sym_spec=1
+				sym_name=${SYM_ARR[ST_NAME]%$'\n'}
+				sym_off=${_sym_off}
+				sym_rel_off=${_sym_rel_off}
+				norm_sym_vm_addr=${_norm_sym_vm_addr}
+				norm_sym_size=${_norm_sym_size}
+			done
+			
+			print_stats 0
+		}
+		exit 0
+	done
+	print_stats 1
+}

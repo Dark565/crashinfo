@@ -18,29 +18,106 @@
 
 # Register and show info about crashing programs
 
-PNAME=${0##*/}
-
-if pgrep "${PNAME}$" | egrep -v "$$" >/dev/null; then
-	notify-send -u low "${PNAME} is already running"
-	exit 1
-fi
+export LC_ALL=C
+export LANG=C
 
 die() {
 	echo "$@" >&2
 	exit 1
 }
 
-case $1 in
-	"-h" | "--help" )
-		die "Usage: $0 [dialog time] [do_flush?{y/n}] [do_daemonize?{y/n}]";;
-	[1-9][0-9]* )
-		DIALOG_TIME=$1;;
-	* )
-		DIALOG_TIME=20000;;
-esac
-[[ $2 == 'y' ]] && DO_NOT_FLUSH=1
+PNAME=${0##*/}
+DIALOG_TIME=20000
+DO_NOT_FLUSH=
 DAEMONIZE_CMD="prog"
-[[ $3 == 'y' ]] && DAEMONIZE_CMD="prog &"
+
+PROG_DIR=$(readlink -f "$0")
+PROG_DIR=${PROG_DIR%/*}
+[[ -z $PROG_DIR ]] && PROG_DIR='.'
+
+SAP_PATH=
+# Find the symbol-at-pos script 
+find_helping_script() {
+	SAP_PATH="${PROG_DIR}/symbol-at-pos"
+	[[ -x $SAP_PATH ]] && return 0
+
+	SAP_PATH=$(command -v symbol-at-pos) || die "Cannot find the symbol-at-pos script"
+}
+
+
+read -r -d '' HELP_STR <<EOF
+Usage: $0 [--noflush] [--daemonize] [dialog time]
+EOF
+help() {
+	die "$HELP_STR"
+}
+
+while [[ -n $1 ]]; do
+	case "$1" in
+		"--noflush" )
+			DO_NOT_FLUSH=1
+			;;
+		"-d" | "--daemonize" )
+			DAEMONIZE_CMD="prog &"
+			;;
+		[1-9][0-9]* )
+			DIALOG_TIME=$1
+			;;
+		* )
+			help
+			;;
+	esac
+	shift 1
+done
+
+if pgrep "${PNAME}$" | egrep -v "$$" >/dev/null; then
+	notify-send -u low "${PNAME} is already running"
+	exit 1
+fi
+
+shorten_path() {
+	local txt=$1
+	local cols=$2
+
+	[[ ${#txt} -le $cols ]] && { SHORTEN_PATH=$txt; return 0; }
+
+	local isdir
+	[[ $txt =~ /$ ]] && { isdir=1; txt="${txt%/}"; }
+
+	local res_txt=
+	local end_txt
+	if [[ $txt =~ ^(/)?([^/]*)/(.*/)?([^/]*)$ ]]; then
+		local isbeg=${#BASH_REMATCH[1]}
+		local sel_txt=${BASH_REMATCH[2]}
+		local sum_txt="${BASH_REMATCH[1]}${BASH_REMATCH[2]}/"
+		local m_slash="${BASH_REMATCH[3]}"
+		end_txt=${BASH_REMATCH[4]}
+
+		res_txt+=${BASH_REMATCH[1]}
+		if (( ${#sum_txt} >= $cols )); then
+			res_txt+=".../"
+		else
+			res_txt+="$sel_txt/"
+			if [[ -n $m_slash ]]; then
+				res_txt+='.../'
+			fi
+		fi
+	else
+		end_txt=$txt
+	fi
+
+	if (( ${#res_txt} + ${#end_txt} >= $cols )); then
+		if [[ $end_txt =~ (.)(\.[^\.]*)?$ ]]; then
+			end_txt="...${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+		fi
+	fi
+	
+	res_txt+=$end_txt
+	[[ -n $isdir ]] && res_txt+='/'
+	(( ${#res_txt} >= $cols )) && return 1
+
+	SHORTEN_PATH=${res_txt}
+}
 
 msg_send() {
 	local icon
@@ -62,85 +139,118 @@ msg_send() {
 	fi
 }
 
+find_helping_script
 
 NL=$'\n'
-print_info() {
-	msg_send "$1" "$1($2) crashed${NL}${NL}Type of fault: $3${NL}${NL}Reason: $4${NL}${NL}IP: $5${NL}${NL}SP: $6${NL}${NL}In: $7"
-}
 
 _DMESG_MAX_NAME_WIDTH=15
 PATTERN_HAS_SQUARE_BRACKET='\['
-execute_trap() {
+print_fault() {
 	local sub_1
 	local name
+	local type_name
+	local reg_cl
 	local pid
 	local reason
 	local ip
 	local sp
 	local lib
+	local page_range
+	local pgrg1
+	local pgrg2
+	local to_send_msg
 	sub_1=${1##*traps: }
 	name=${sub_1}
+	type_name=$2
+	reg_cl=$3
 	while [[ ${#name} -gt ${_DMESG_MAX_NAME_WIDTH} ]] && [[ ${name} =~ ${PATTERN_HAS_SQUARE_BRACKET} ]]; do
 		name=${name%[*}
 	done
 	pid=${sub_1#*${name}[}
 	reason=${pid#* }
-	ip=${reason#*ip:}
-	sp=${reason#*sp:}
+	ip=${reason#*ip${reg_cl}}
+	ip=${ip}
+	sp=${reason#*sp${reg_cl}}
+	sp=${sp}
 	lib=${reason#*in }
 	reason=${reason%% ip*}
 	ip=${ip%% *}
 	sp=${sp%% *}
 	pid=${pid%%]*}
-	print_info "${name}" "${pid}" "trap" "${reason}" "${ip}" "${sp}" "${lib}"
-}
+	page_range=${lib#*[}
+	lib=${lib%[*}
+	page_range=${page_range%]}
+	pgrg1=${page_range%+*}
+	local pgrg_diff=${page_range#*+}
+	printf -v pgrg2 "%x" $((0x$pgrg1 + 0x$pgrg_diff))
 
-execute_sigsegv() {
-	local sub_1
-	local name
-	local pid
-	local reason
-	local ip
-	local sp
-	local lib
-	sub_1=$1
-	name=$1
-	while [[ ${#name} -gt ${_DMESG_MAX_NAME_WIDTH} ]] && [[ ${name} =~ ${PATTERN_HAS_SQUARE_BRACKET} ]]; do
-		name=${name%[*}
-	done
-	pid=${sub_1#*${name}[}
-	reason=${pid#* }
-	ip=${reason#*ip }
-	sp=${reason#*sp }
-	lib=${reason#*in }
-	reason=${reason%% ip*}
-	ip=${ip%% *}
-	sp=${sp%% *}
-	pid=${pid%%]*}
-	print_info "${name}" "${pid}" "segfault" "${reason}" "${ip}" "${sp}" "${lib}"
+	local maps_content=$(</proc/$pid/maps)
+	local full_name=$(readlink /proc/$pid/exe)
+	local full_lib=$(readlink /proc/$pid/map_files/$pgrg1-$pgrg2)
+	shorten_path "$full_name" 20
+	local shorten_name=${SHORTEN_PATH}
+	local map_line=$(echo $(echo "$maps_content" | grep "^0*$pgrg1-0*$pgrg2"))
+	local fo1=$(echo "$map_line" | cut -d' ' -f3 | sed -E 's/^0*([0-9a-f]+)/\1/')
+	#local fo2
+	#printf -v fo2 "%x\n" $((0x$fo1+0x$pgrg_diff))
+	shorten_path "$full_lib" 20
+	local shorten_lib=${SHORTEN_PATH}
+
+	[[ "$ip" =~ ^0*([0-9a-f]+)$ ]]
+	local norm_ip=${BASH_REMATCH[1]}
+
+	local ip_rel_off=$((0x$norm_ip - 0x$pgrg1 + 0x$fo1))
+
+	declare -a sym_arr
+	readarray sym_arr <<<"$("${SAP_PATH}" "${full_lib}" ${ip_rel_off})"
+	sym_arr[0]=${sym_arr[0]%$NL}
+	sym_arr[3]=${sym_arr[3]%$NL}
+
+	local vm_sym_start
+	if [[ ${sym_arr[3]%} != "[unknown]" ]]; then
+		printf -v vm_sym_start "0x%x" $((0x$norm_ip - $ip_rel_off + ${sym_arr[4]}))
+	else
+		vm_sym_start=0x$norm_ip
+	fi
+
+	read -r -d '' to_send_msg <<EOF
+${shorten_name}(${pid}) crashed
+
+Type of fault: ${type_name}
+Reason: ${reason}
+IP: 0x${ip}
+SP: 0x${sp}
+
+Code source: ${shorten_lib}
+- Section: ${sym_arr[0]}
+- Function: ${sym_arr[3]}
+-- VM: ${vm_sym_start}
+EOF
+
+	msg_send "${name}" "${to_send_msg}"
 }
 
 prog() {
-PATTERN_TRAPS='^traps:'
-PATTERN_SEGFAULT='^.*: segfault'
-dmesg -ktw -l info | \
-{
-	# Flush previous crashes.
-	# They are useless in the start
-	if [[ -z ${DO_NOT_FLUSH} ]]; then
-		sleep 0.5
-		while read -t0; do read -r; done
-	fi
-
-	# Start the main loop
-	while read -r LINE; do
-		if [[ ${LINE} =~ ${PATTERN_TRAPS} ]]; then
-			execute_trap "$LINE"
-		elif [[ ${LINE} =~ ${PATTERN_SEGFAULT} ]]; then
-			execute_sigsegv "$LINE"
+	PATTERN_TRAPS='^traps:'
+	PATTERN_SEGFAULT='^.*: segfault'
+	dmesg -ktw -l info | \
+	{
+		# Flush previous crashes.
+		# They are useless in the start
+		if [[ -z ${DO_NOT_FLUSH} ]]; then
+			sleep 0.5
+			while read -t0; do read -r; done
 		fi
-	done
-}
+
+		# Start the main loop
+		while read -r LINE; do
+			if [[ ${LINE} =~ ${PATTERN_TRAPS} ]]; then
+				print_fault "$LINE" trap ':' &
+			elif [[ ${LINE} =~ ${PATTERN_SEGFAULT} ]]; then
+				print_fault "$LINE" segfault ' ' &
+			fi
+		done
+	}
 }
 
 eval "${DAEMONIZE_CMD}"
