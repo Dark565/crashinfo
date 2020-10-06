@@ -210,7 +210,7 @@ print_fault() {
 	if [[ ${sym_arr[3]%} != "[unknown]" ]]; then
 		printf -v vm_sym_start "0x%x" $((0x$norm_ip - $ip_rel_off + ${sym_arr[4]}))
 	else
-		vm_sym_start=0x$norm_ip
+		vm_sym_start='?'
 	fi
 
 	read -r -d '' to_send_msg <<EOF
