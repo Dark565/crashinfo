@@ -75,6 +75,13 @@ if pgrep "${PNAME}$" | egrep -v "$$" >/dev/null; then
 	exit 1
 fi
 
+if ! command -v c++filt &>/dev/null; then
+	echo "Warning: c++filt not found. Mangled names will not be demangled."
+	function c++filt() {
+		echo "$1"
+	}
+fi
+
 shorten_path() {
 	local txt=$1
 	local cols=$2
@@ -123,6 +130,7 @@ msg_send() {
 	local icon
 	local found
 	local pref_arg
+	local notify_ln
 	icon=$1
 	shift 1
 	if [[ -n $DEBUG ]]; then
@@ -135,7 +143,10 @@ msg_send() {
 			-type f 2>/dev/null | head -n1)
 
 		[[ -n ${found} ]] && pref_arg="-i"
-		notify-send -u critical -t ${DIALOG_TIME} "$@" ${pref_arg} "${found}"
+		notify_ln="notify-send -u critical -t \${DIALOG_TIME} \"\$@\""
+		[[ -n ${found} ]] && notify_ln+=" -i \"\${found}\""
+
+		eval "$notify_ln"
 	fi
 }
 
@@ -208,14 +219,13 @@ print_fault() {
 
 	local vm_sym_start
 	if [[ ${sym_arr[3]%} != "[unknown]" ]]; then
+		sym_arr[3]=$(c++filt "${sym_arr[3]}")
 		printf -v vm_sym_start "0x%x" $((0x$norm_ip - $ip_rel_off + ${sym_arr[4]}))
 	else
 		vm_sym_start='?'
 	fi
 
 	read -r -d '' to_send_msg <<EOF
-${shorten_name}(${pid}) crashed
-
 Type of fault: ${type_name}
 Reason: ${reason}
 IP: 0x${ip}
@@ -227,7 +237,7 @@ Code source: ${shorten_lib}
 -- VM: ${vm_sym_start}
 EOF
 
-	msg_send "${name}" "${to_send_msg}"
+	msg_send "${name}" "${shorten_name}(${pid}) crashed" "${to_send_msg}"
 }
 
 prog() {
